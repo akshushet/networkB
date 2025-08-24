@@ -95,7 +95,6 @@ async function main() {
       methods: ['GET', 'POST'],
       credentials: true
     },
-    // helps on free hosts with cold starts / proxies
     pingInterval: 25000,
     pingTimeout: 60000,
   })
