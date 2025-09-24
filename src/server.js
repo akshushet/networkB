@@ -78,17 +78,6 @@ async function main() {
 
   const server = http.createServer(app)
 
-  // const io = new Server(server, {
-  //   cors: {
-  //     origin: (origin, cb) => {
-  //       if (!origin || RAW_ORIGINS.includes(origin)) return cb(null, true)
-  //       return cb(null, false)
-  //     },
-  //     methods: ['GET', 'POST'],
-  //     credentials: true
-  //   },
-  // })
-
   const io = new Server(server, {
     cors: {
       origin: (origin, cb) => cb(null, allowOrigin(origin)),
