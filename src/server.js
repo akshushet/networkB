@@ -56,15 +56,6 @@ async function main() {
   const upDir = ensureDir(path.join(__dirname, '..', 'uploads'))
   app.use('/uploads', express.static(upDir, { maxAge: '7d', fallthrough: true }))
 
-  // CORS (REST)
-  // app.use(cors({
-  //   origin: (origin, cb) => {
-  //     if (!origin || RAW_ORIGINS.includes(origin)) return cb(null, true)
-  //     return cb(null, false)
-  //   },
-  //   credentials: true
-  // }))
-
   app.use(cors({
     origin: (origin, cb) => cb(null, allowOrigin(origin)),
     credentials: true

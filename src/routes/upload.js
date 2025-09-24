@@ -5,8 +5,16 @@ const path = require('path')
 const mime = require('mime-types')
 const sizeOf = require('image-size')
 const { v2: cloudinary } = require('cloudinary')
-const sharp = require('sharp') // <-- NEW
+
 const router = express.Router()
+
+// ---- sanity check env ----
+const requiredEnv = ['CLOUDINARY_CLOUD_NAME','CLOUDINARY_API_KEY','CLOUDINARY_API_SECRET']
+for (const k of requiredEnv) {
+  if (!process.env[k]) {
+    console.error(`[upload] Missing env ${k}`)
+  }
+}
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -15,130 +23,115 @@ cloudinary.config({
 })
 
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 8)
-const ALLOWED = (process.env.ALLOWED_IMAGE_MIME || 'image/jpeg,image/png,image/webp,image/gif')
+const ALLOWED = (process.env.ALLOWED_IMAGE_MIME || 'image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,image/avif,image/svg+xml')
   .split(',').map(s => s.trim()).filter(Boolean)
-
-// Compression controls (override via env if you like)
-const MAX_IMAGE_DIM   = Number(process.env.MAX_IMAGE_DIM || 2560) // px (longer side)
-const OUTPUT_FORMAT   = (process.env.OUTPUT_FORMAT || 'webp').toLowerCase() // 'webp' | 'avif' | 'original'
-const WEBP_QUALITY    = Number(process.env.WEBP_QUALITY || 82)   // 1..100
-const AVIF_QUALITY    = Number(process.env.AVIF_QUALITY || 45)   // 1..100
-const CLOUD_FOLDER    = process.env.CLOUDINARY_FOLDER || 'uploads'
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024 },
   fileFilter(req, file, cb) {
-    if (!ALLOWED.includes(file.mimetype)) return cb(new Error('Unsupported file type: ' + file.mimetype))
+    if (!ALLOWED.includes(file.mimetype)) {
+      return cb(new multer.MulterError('LIMIT_UNEXPECTED_FILE', `Unsupported file type: ${file.mimetype}`))
+    }
     cb(null, true)
   }
 })
 
-async function compressImage(inputBuffer, mimetype) {
-  // Skip compression for animated GIFs (sharp will only read first frame)
-  // We'll just pass-through in that case.
-  if (mimetype === 'image/gif') {
-    // Try to detect animation frames; if animated, skip re-encode
+router.post('/upload',
+  // Multer middleware (note: errors from this go to the error handler below)
+  upload.single('file'),
+
+  // Your handler
+  async (req, res, next) => {
     try {
-      const meta = await sharp(inputBuffer, { limitInputPixels: false }).metadata()
-      if ((meta.pages || 1) > 1) {
-        return { buffer: inputBuffer, mime: 'image/gif', width: meta.width, height: meta.height, ext: 'gif' }
+      if (!req.file) {
+        return res.status(400).json({ error: 'file is required' })
       }
-    } catch { /* ignore and fall through */ }
-  }
 
-  // Read metadata and rotate per EXIF
-  const base = sharp(inputBuffer, { limitInputPixels: false }).rotate()
-  const meta = await base.metadata()
+      // quick env guard
+      for (const k of requiredEnv) {
+        if (!process.env[k]) {
+          return res.status(500).json({ error: `Server misconfigured: ${k} not set` })
+        }
+      }
 
-  // Resize to fit within MAX_IMAGE_DIM (keeps aspect; no upscaling)
-  let pipe = base.resize({
-    width:  meta.width  && meta.width  > MAX_IMAGE_DIM ? MAX_IMAGE_DIM : undefined,
-    height: meta.height && meta.height > MAX_IMAGE_DIM ? MAX_IMAGE_DIM : undefined,
-    fit: 'inside',
-    withoutEnlargement: true
-  })
+      const folder = process.env.CLOUDINARY_FOLDER || 'uploads'
+      let dims = {}
+      try {
+        // image-size supports Buffer; may throw for some formats -> guarded
+        dims = sizeOf(req.file.buffer) || {}
+      } catch (e) {
+        // non-fatal
+        console.warn('[upload] sizeOf failed:', e?.message)
+      }
 
-  // Decide target encoding
-  let targetMime = mimetype
-  let ext = mime.extension(mimetype)
+      // Cloudinary upload via stream
+      const result = await new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          {
+            folder,
+            // 'auto' lets Cloudinary accept svg/heic/avif too
+            resource_type: 'auto',
+            // helpful naming options; optional
+            use_filename: true,
+            unique_filename: true,
+            overwrite: false,
+            // passing content type improves detection in some cases
+            type: 'upload'
+          },
+          (err, r) => err ? reject(err) : resolve(r)
+        )
+        stream.on('error', (err) => {
+          // this catches lower-level stream errors
+          reject(err)
+        })
+        stream.end(req.file.buffer)
+      })
 
-  if (OUTPUT_FORMAT === 'original') {
-    // Keep original container but still benefit from resize/EXIF fix
-    // Optionally, you could choose jpeg/webp for jpegs to reduce size further.
-    if (mimetype === 'image/jpeg') {
-      pipe = pipe.jpeg({ quality: 82, mozjpeg: true })
-      targetMime = 'image/jpeg'; ext = 'jpg'
-    } else if (mimetype === 'image/png') {
-      // Lossless-ish PNG optimization; consider converting PNG->WEBP for photos
-      pipe = pipe.png({ compressionLevel: 9, palette: true })
-      targetMime = 'image/png'; ext = 'png'
-    } else if (mimetype === 'image/webp') {
-      pipe = pipe.webp({ quality: WEBP_QUALITY })
-      targetMime = 'image/webp'; ext = 'webp'
-    } else {
-      // Fallback: just output buffer as-is
-      return { buffer: await pipe.toBuffer(), mime: mimetype, width: meta.width, height: meta.height, ext }
+      return res.json({
+        url: result.secure_url,
+        path: result.public_id,       // store this in DB if you want to delete later
+        size: req.file.size,
+        mime: req.file.mimetype,
+        width: result.width || dims.width || null,
+        height: result.height || dims.height || null,
+        filename: (result.public_id || '').split('/').pop()
+      })
+    } catch (e) {
+      // Log *full* error to server logs
+      console.error('[upload] Error:', {
+        name: e.name,
+        message: e.message,
+        http_code: e.http_code,
+        stack: e.stack
+      })
+      // Surface a safe, useful payload
+      return res.status(500).json({
+        error: e.message || 'Upload failed',
+        code: e.http_code || 500,
+        details: e.name || 'Error'
+      })
     }
-  } else if (OUTPUT_FORMAT === 'avif') {
-    pipe = pipe.avif({ quality: AVIF_QUALITY })
-    targetMime = 'image/avif'; ext = 'avif'
-  } else {
-    // default: webp
-    // nearLossless helps for graphics/PNGs
-    const nearLossless = (meta.format === 'png')
-    pipe = pipe.webp({ quality: WEBP_QUALITY, nearLossless })
-    targetMime = 'image/webp'; ext = 'webp'
   }
+)
 
-  const out = await pipe.toBuffer()
-  const dims = sizeOf(out) // quick read on output
-  return { buffer: out, mime: targetMime, width: dims.width, height: dims.height, ext }
-}
-
-router.post('/upload', upload.single('file'), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: 'file is required' })
-
-    // Compress first
-    const { buffer: compressed, mime: outMime, width, height, ext } =
-      await compressImage(req.file.buffer, req.file.mimetype)
-
-    // Upload compressed buffer to Cloudinary
-    const result = await new Promise((resolve, reject) => {
-      const stream = cloudinary.uploader.upload_stream(
-        {
-          folder: CLOUD_FOLDER,
-          resource_type: 'image',
-          // Let Cloudinary store as our encoded format
-          format: ext,
-          // If you'd like a deterministic public_id:
-          // public_id: Date.now() + '-' + Math.random().toString(36).slice(2, 8)
-        },
-        (err, r) => err ? reject(err) : resolve(r)
-      )
-      stream.end(compressed)
-    })
-
-    // Also provide an optimized delivery URL (q_auto,f_auto)
-    const optimizedUrl = cloudinary.url(result.public_id, {
-      secure: true,
-      transformation: [{ quality: 'auto', fetch_format: 'auto' }]
-    })
-
-    res.json({
-      url: result.secure_url,          // uploaded (compressed) asset
-      optimizedUrl,                    // delivery-optimized URL for clients
-      path: result.public_id,
-      size: compressed.length,         // compressed size in bytes
-      mime: outMime,                   // compressed mime
-      width: result.width || width || null,
-      height: result.height || height || null,
-      filename: result.public_id.split('/').pop()
-    })
-  } catch (e) {
-    res.status(500).json({ error: e.message })
+// Multer & general error handler for this router:
+router.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    // Multer errors (size, fileFilter, etc.)
+    const payload = { error: 'Upload error', code: err.code }
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      payload.message = `File too large. Max ${MAX_UPLOAD_MB} MB.`
+    } else if (err.code === 'LIMIT_UNEXPECTED_FILE') {
+      payload.message = err.message || 'Unsupported file type'
+    } else {
+      payload.message = err.message
+    }
+    console.warn('[upload] Multer error:', err)
+    return res.status(400).json(payload)
   }
+  // Anything else bubbles up
+  next(err)
 })
 
 module.exports = router
