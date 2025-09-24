@@ -21,7 +21,7 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 })
 
-const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 8)
+const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 100)
 const ALLOWED = (process.env.ALLOWED_IMAGE_MIME || 'image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,image/avif,image/svg+xml,video/mp4,video/quicktime,video/x-msvideo,video/x-matroska')
   .split(',').map(s => s.trim()).filter(Boolean)
 
@@ -30,11 +30,14 @@ const upload = multer({
   limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024 },
   fileFilter(req, file, cb) {
     if (!ALLOWED.includes(file.mimetype)) {
-      return cb(new multer.MulterError('LIMIT_UNEXPECTED_FILE', `Unsupported file type: ${file.mimetype}`))
+      const err = new Error(`Unsupported file type: ${file.mimetype}`)
+      err.code = 'UNSUPPORTED_FILE_TYPE'
+      return cb(err)
     }
     cb(null, true)
   }
 })
+
 
 router.post('/upload',
   // Multer middleware (note: errors from this go to the error handler below)
@@ -117,19 +120,31 @@ router.post('/upload',
 // Multer & general error handler for this router:
 router.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
-    // Multer errors (size, fileFilter, etc.)
     const payload = { error: 'Upload error', code: err.code }
     if (err.code === 'LIMIT_FILE_SIZE') {
       payload.message = `File too large. Max ${MAX_UPLOAD_MB} MB.`
     } else if (err.code === 'LIMIT_UNEXPECTED_FILE') {
-      payload.message = err.message || 'Unsupported file type'
+      // true unexpected-field case (wrong field name or too many files)
+      payload.message = 'Unexpected field'
+      payload.hint = "Send the file under field name 'file'."
     } else {
       payload.message = err.message
     }
     console.warn('[upload] Multer error:', err)
     return res.status(400).json(payload)
   }
-  // Anything else bubbles up
+
+  // <- handle our custom MIME rejection cleanly
+  if (err?.code === 'UNSUPPORTED_FILE_TYPE') {
+    console.warn('[upload] MIME reject:', err.message)
+    return res.status(400).json({
+      error: 'Upload error',
+      code: err.code,
+      message: err.message,
+      allowed: ALLOWED
+    })
+  }
+
   next(err)
 })
 
