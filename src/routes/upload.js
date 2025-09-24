@@ -8,7 +8,6 @@ const { v2: cloudinary } = require('cloudinary')
 
 const router = express.Router()
 
-// ---- sanity check env ----
 const requiredEnv = ['CLOUDINARY_CLOUD_NAME','CLOUDINARY_API_KEY','CLOUDINARY_API_SECRET']
 for (const k of requiredEnv) {
   if (!process.env[k]) {
@@ -23,7 +22,7 @@ cloudinary.config({
 })
 
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 8)
-const ALLOWED = (process.env.ALLOWED_IMAGE_MIME || 'image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,image/avif,image/svg+xml')
+const ALLOWED = (process.env.ALLOWED_IMAGE_MIME || 'image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,image/avif,image/svg+xml,video/mp4,video/quicktime,video/x-msvideo,video/x-matroska')
   .split(',').map(s => s.trim()).filter(Boolean)
 
 const upload = multer({
