@@ -25,22 +25,15 @@ const { convoKey, ensureDir } = require('./utils')
 const PORT = process.env.PORT || 4000
 const MONGO_URL = process.env.MONGO_URL
 
-// Accept multiple origins (comma-separated)
 const RAW_ORIGINS = (process.env.CORS_ORIGIN || 'http://localhost:5173,http://127.0.0.1:5173')
   .split(',').map(s => s.trim()).filter(Boolean)
 
-// allow production preview domains without listing every URL
 function allowOrigin(origin) {
-  if (!origin) return true;                          // same-origin, curl, etc.
-  if (RAW_ORIGINS.includes(origin)) return true;     // exact allowlist from env
-  if (origin.endsWith('.vercel.app')) return true;   // Vercel previews + prod
-  // (optional) if you might test Netlify/CF
-  // if (origin.endsWith('.netlify.app')) return true;
-  // if (origin.endsWith('.pages.dev')) return true;
+  if (!origin) return true;
+  if (RAW_ORIGINS.includes(origin)) return true;
+  if (origin.endsWith('.vercel.app')) return true;
   return false;
 }
-
-registerPresence(io);
 
 async function getOrCreateConversation(a, b) {
   const key = convoKey(a, b)
@@ -82,6 +75,8 @@ async function main() {
     pingTimeout: 60000,
   })
 
+  registerPresence(io);
+
   io.on('connection', async (socket) => {
     const code = (socket.handshake?.query?.code || '').toString().toUpperCase()
     if (!code) {
@@ -89,9 +84,12 @@ async function main() {
       return socket.disconnect(true)
     }
 
-    await User.updateOne({ code }, { $set: { code, name: code, online: true } }, { upsert: true })
     socket.join(`user:${code}`)
     console.log(`[socket] ${code} connected: ${socket.id}`)
+    const room = io.sockets.adapter.rooms.get(`user:${code}`);
+    if ((room?.size || 0) === 1) {
+      await User.updateOne({ code }, { $set: { code, name: code, online: true } }, { upsert: true });
+    }
 
     // deliver missed
     try {
@@ -113,13 +111,16 @@ async function main() {
       console.error('deliver on connect error', e)
     }
 
+    // socket.on('disconnect', async () => {
+    //   await User.updateOne({ code }, { $set: { online: false } })
+    //   console.log(`[socket] ${code} disconnected`)
+    // })
     socket.on('disconnect', async () => {
-      await User.updateOne({ code }, { $set: { online: false } })
-      console.log(`[socket] ${code} disconnected`)
-    })
-
-    // message:send payload: { id, text, from, to, timestamp }
-    // message:send payload: { id?, text?, from, to, timestamp?, type?, media? }
+      const stillThere = (io.sockets.adapter.rooms.get(`user:${code}`)?.size || 0) > 0;
+      if (!stillThere) {
+        await User.updateOne({ code }, { $set: { online: false } });
+      }
+    });
 
     socket.on('message:send', async (payload, ack) => {
       try {
@@ -194,7 +195,6 @@ async function main() {
     console.log(`[http] listening on http://localhost:${PORT}`)
   })
 }
-
 
 main().catch(err => {
   console.error('Fatal:', err)
