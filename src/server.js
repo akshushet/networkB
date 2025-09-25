@@ -16,6 +16,7 @@ const http = require('http')
 const cors = require('cors')
 const { Server } = require('socket.io')
 const { connect } = require('./db')
+const registerPresence = require('./presence');
 const User = require('./models/User')
 const Conversation = require('./models/Conversation')
 const Message = require('./models/Message')
@@ -38,6 +39,8 @@ function allowOrigin(origin) {
   // if (origin.endsWith('.pages.dev')) return true;
   return false;
 }
+
+registerPresence(io);
 
 async function getOrCreateConversation(a, b) {
   const key = convoKey(a, b)
@@ -191,6 +194,7 @@ async function main() {
     console.log(`[http] listening on http://localhost:${PORT}`)
   })
 }
+
 
 main().catch(err => {
   console.error('Fatal:', err)
