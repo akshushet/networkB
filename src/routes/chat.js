@@ -32,30 +32,82 @@ router.get('/conversation', async (req, res) => {
 })
 
 // Messages history
+// router.get('/messages', async (req, res) => {
+//   const { me, peer, limit = 50, before } = req.query
+//   if (!me || !peer) return res.status(400).json({ error: 'me and peer are required' })
+//   try {
+//     const key = convoKey(me, peer)
+//     const convo = await Conversation.findOne({ participantsKey: key }).lean()
+//     if (!convo) return res.json({ messages: [] })
+//     const query = { conversation: convo._id }
+//     if (before) query.timestamp = { $lt: new Date(before) }
+//     const msgs = await Message.find(query, { __v: 0 })
+//       .sort({ timestamp: 1 })
+//       .limit(Number(limit))
+//       .lean()
+//     res.json({
+//       messages: msgs.map(m => ({
+//         id: String(m._id),
+//         conversation: String(m.conversation),
+//         from: m.from, to: m.to,
+//         type: m.type || 'text',     // <-- include
+//         text: m.text,
+//         media: m.media || null,     // <-- include
+//         timestamp: new Date(m.timestamp).getTime(),
+//         status: m.status
+//       }))
+//     })
+//   } catch (e) {
+//     res.status(500).json({ error: e.message })
+//   }
+// })
+
+// Messages history (latest-first by default, with cursors)
 router.get('/messages', async (req, res) => {
-  const { me, peer, limit = 50, before } = req.query
+  const { me, peer } = req.query
+  const limit = Number(req.query.limit ?? 50)
+  const before = req.query.before
+  const after = req.query.after
+  const order = req.query.order // 'asc' | 'desc' (default: 'desc')
+
   if (!me || !peer) return res.status(400).json({ error: 'me and peer are required' })
+
   try {
     const key = convoKey(me, peer)
     const convo = await Conversation.findOne({ participantsKey: key }).lean()
     if (!convo) return res.json({ messages: [] })
+
     const query = { conversation: convo._id }
-    if (before) query.timestamp = { $lt: new Date(before) }
-    const msgs = await Message.find(query, { __v: 0 })
-      .sort({ timestamp: 1 })
-      .limit(Number(limit))
+
+    // optional time cursors
+    if (before) {
+      query.timestamp = { ...(query.timestamp || {}), $lt: new Date(before) }
+    }
+    if (after) {
+      query.timestamp = { ...(query.timestamp || {}), $gt: new Date(after) }
+    }
+
+    // fetch newest first by default, then reverse for chronological UI
+    const sortOrder = order === 'asc' ? 1 : -1
+    const rows = await Message.find(query, { __v: 0 })
+      .sort({ timestamp: sortOrder })
+      .limit(limit)
       .lean()
+
+    const msgs = sortOrder === -1 ? rows.reverse() : rows
+
     res.json({
       messages: msgs.map(m => ({
         id: String(m._id),
         conversation: String(m.conversation),
-        from: m.from, to: m.to,
-        type: m.type || 'text',     // <-- include
+        from: m.from,
+        to: m.to,
+        type: m.type || 'text',
         text: m.text,
-        media: m.media || null,     // <-- include
+        media: m.media || null,
         timestamp: new Date(m.timestamp).getTime(),
-        status: m.status
-      }))
+        status: m.status,
+      })),
     })
   } catch (e) {
     res.status(500).json({ error: e.message })
