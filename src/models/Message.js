@@ -16,10 +16,10 @@ const MessageSchema = new mongoose.Schema({
 
   // NEW: message type + optional media
   type: { type: String, enum: ['text', 'image'], default: 'text', index: true },
-  text: { type: String },           // no longer "required"; may be empty for image messages
+  text: { type: String, trim: true, maxlength: 5000 },           // no longer "required"; may be empty for image messages
   media:{ type: MediaSchema, default: null },
 
-  timestamp: { type: Date, default: () => new Date(), index: true },
+  timestamp: { type: Date, default: Date.now, index: true },
   status: { type: String, enum: ['sent','delivered','read'], default: 'sent', index: true },
 }, { timestamps: true })
 

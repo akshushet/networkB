@@ -87,6 +87,11 @@ async function main() {
     socket.join(`user:${code}`)
     console.log(`[socket] ${code} connected: ${socket.id}`)
     const room = io.sockets.adapter.rooms.get(`user:${code}`);
+
+    // --- Helper: check if a user has any live sockets
+    const isOnline = (who) => (io.sockets.adapter.rooms.get(`user:${who}`)?.size || 0) > 0;
+
+    // --- Replay pending ("sent") messages on connect, but DO NOT mark as delivered here.
     if ((room?.size || 0) === 1) {
       await User.updateOne({ code }, { $set: { code, name: code, online: true } }, { upsert: true });
     }
@@ -104,8 +109,8 @@ async function main() {
           media: m.media || null,     // <-- add
           timestamp: new Date(m.timestamp).getTime()
         })
-        await Message.updateOne({ _id: m._id }, { $set: { status: 'delivered' } })
-        io.to(`user:${m.from}`).emit('message:delivered', { id: String(m._id) })
+        // await Message.updateOne({ _id: m._id }, { $set: { status: 'delivered' } })
+        // io.to(`user:${m.from}`).emit('message:delivered', { id: String(m._id) })
       }
     } catch (e) {
       console.error('deliver on connect error', e)
@@ -118,7 +123,7 @@ async function main() {
     socket.on('disconnect', async () => {
       const stillThere = (io.sockets.adapter.rooms.get(`user:${code}`)?.size || 0) > 0;
       if (!stillThere) {
-        await User.updateOne({ code }, { $set: { online: false } });
+        await User.updateOne({ code }, { $set: { online: false, lastSeen: new Date() } });
       }
     });
 
@@ -152,8 +157,21 @@ async function main() {
         socket.emit('message:sent', { tempId, realId: String(msg._id) })
 
         // Deliver to recipient if online
-        const delivered = (io.sockets.adapter.rooms.get(`user:${to}`)?.size || 0) > 0
-        if (delivered) {
+        // const delivered = (io.sockets.adapter.rooms.get(`user:${to}`)?.size || 0) > 0
+        // if (delivered) {
+        //   io.to(`user:${to}`).emit('message', {
+        //     id: String(msg._id),
+        //     text: msg.text,
+        //     from: msg.from,
+        //     to: msg.to,
+        //     type: msg.type,             // <-- add
+        //     media: msg.media,           // <-- add
+        //     timestamp: new Date(msg.timestamp).getTime()
+        //   })
+        //   await Message.updateOne({ _id: msg._id }, { $set: { status: 'delivered' } })
+        //   io.to(`user:${from}`).emit('message:delivered', { id: String(msg._id) })
+        // }
+        if (isOnline(to)) {
           io.to(`user:${to}`).emit('message', {
             id: String(msg._id),
             text: msg.text,
@@ -163,8 +181,7 @@ async function main() {
             media: msg.media,           // <-- add
             timestamp: new Date(msg.timestamp).getTime()
           })
-          await Message.updateOne({ _id: msg._id }, { $set: { status: 'delivered' } })
-          io.to(`user:${from}`).emit('message:delivered', { id: String(msg._id) })
+          // Wait for recipient device to ACK with message:delivered before changing status
         }
       } catch (e) {
         console.error('message:send error', e)
@@ -172,22 +189,45 @@ async function main() {
       }
     })
 
+    // socket.on('message:delivered', async ({ id }) => {
+    //   if (!id) return
+    //   const m = await Message.findById(id)
+    //   if (!m) return
+    //   if (m.status !== 'read') {
+    //     await Message.updateOne({ _id: id }, { $set: { status: 'delivered' } })
+    //     io.to(`user:${m.from}`).emit('message:delivered', { id })
+    //   }
+    // })
+
     socket.on('message:delivered', async ({ id }) => {
       if (!id) return
       const m = await Message.findById(id)
       if (!m) return
-      if (m.status !== 'read') {
-        await Message.updateOne({ _id: id }, { $set: { status: 'delivered' } })
+      if (m.to !== code) return
+      if (m.status === 'sent') {
+        // await Message.updateOne({ _id: id }, { $set: { status: 'delivered' } })
+        await Message.updateOne({ _id: id }, { $set: { status: 'delivered', deliveredAt: new Date() } })
         io.to(`user:${m.from}`).emit('message:delivered', { id })
       }
     })
 
+    // socket.on('message:read', async ({ id }) => {
+    //   if (!id) return
+    //   const m = await Message.findById(id)
+    //   if (!m) return
+    //   await Message.updateOne({ _id: id }, { $set: { status: 'read' } })
+    //   io.to(`user:${m.from}`).emit('message:read', { id })
+    // })
     socket.on('message:read', async ({ id }) => {
       if (!id) return
       const m = await Message.findById(id)
       if (!m) return
-      await Message.updateOne({ _id: id }, { $set: { status: 'read' } })
-      io.to(`user:${m.from}`).emit('message:read', { id })
+      if (m.to !== code) return
+      if (m.status !== 'read') {
+        // await Message.updateOne({ _id: id }, { $set: { status: 'read' } })
+        await Message.updateOne({ _id: id }, { $set: { status: 'read', readAt: new Date() } })
+        io.to(`user:${m.from}`).emit('message:read', { id })
+      }
     })
   })
 
